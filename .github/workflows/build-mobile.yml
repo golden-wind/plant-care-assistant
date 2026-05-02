@@ -1,0 +1,168 @@
+name: Build Mobile Apps
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build web assets
+      run: npm run build
+
+    - name: Setup Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Cache Gradle packages
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    - name: Make gradlew executable
+      run: chmod +x ./android/gradlew
+
+    - name: Sync Capacitor Android
+      run: npx cap sync android
+
+    - name: Build Debug APK
+      run: |
+        cd android
+        ./gradlew assembleDebug --stacktrace
+
+    - name: Upload Debug APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-debug
+        path: android/app/build/outputs/apk/debug/app-debug.apk
+        retention-days: 30
+
+    - name: Build Release APK (unsigned)
+      run: |
+        cd android
+        ./gradlew assembleRelease --stacktrace
+
+    - name: Upload Release APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-unsigned
+        path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+        retention-days: 30
+
+  build-ios:
+    name: Build iOS App
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build web assets
+      run: npm run build
+
+    - name: Sync Capacitor iOS
+      run: npx cap sync ios
+
+    - name: Build iOS (Simulator)
+      run: |
+        cd ios/App
+        xcodebuild -workspace App.xcworkspace \
+          -scheme App \
+          -destination 'platform=iOS Simulator,name=iPhone 15' \
+          -configuration Debug \
+          build
+
+    - name: Create iOS Simulator App
+      run: |
+        cd ios/App
+        # 找到构建产物
+        BUILD_DIR=$(xcodebuild -workspace App.xcworkspace -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' -configuration Debug -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | grep -oE "\/.*")
+        echo "Build directory: $BUILD_DIR"
+
+        # 打包为zip
+        if [ -d "$BUILD_DIR/App.app" ]; then
+          cd "$BUILD_DIR"
+          zip -r "$GITHUB_WORKSPACE/ios-simulator-app.zip" App.app
+        fi
+
+    - name: Upload iOS Simulator App
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-simulator-app
+        path: ios-simulator-app.zip
+        retention-days: 30
+        if-no-files-found: ignore
+
+    - name: Upload iOS Project
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-project
+        path: ios/
+        retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-android, build-ios]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+    - name: Download Android Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: app-debug
+        path: ./artifacts/android/
+
+    - name: Download iOS Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ios-simulator-app
+        path: ./artifacts/ios/
+
+    - name: Create Release
+      uses: marvinpinto/action-automatic-releases@latest
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        automatic_release_tag: latest
+        prerelease: true
+        title: "Development Build"
+        files: |
+          ./artifacts/android/app-debug.apk
+          ./artifacts/ios/ios-simulator-app.zip
